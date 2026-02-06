@@ -26,6 +26,17 @@ jobs:
       - name: Install jq
         run: sudo apt-get install -y jq
 
+      - name: Validate secrets
+        env:
+          NOTE_TOKEN: ${{ secrets.NOTE_TOKEN }}
+        run: |
+          if [ -z "$NOTE_TOKEN" ]; then
+            echo "::error::NOTE_TOKEN secret is not set. Please add it to repository secrets."
+            echo "Format: _note_session_v5=xxx"
+            exit 1
+          fi
+          echo "All required secrets are configured."
+
       - name: Publish articles
         if: steps.changed-files.outputs.any_changed == 'true'
         env:
