@@ -1,0 +1,70 @@
+name: Publish to Note.com Production
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'posts/**/*.md'
+
+jobs:
+  publish-production:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            posts/**/*.md
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Publish articles
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          NOTE_TOKEN: ${{ secrets.NOTE_TOKEN }}
+        run: |
+          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+            echo "Publishing: $file"
+            ./scripts/publish.sh publish "$file"
+          done
+
+      - name: Commit article IDs
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          if [[ -f note_article_ids.json ]]; then
+            git add note_article_ids.json
+            git diff --staged --quiet || git commit -m "Update note article IDs [skip ci]"
+            git push
+          fi
+
+      - name: Send Discord notification on success
+        if: success() && steps.changed-files.outputs.any_changed == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+            curl -H "Content-Type: application/json" \
+              -d "{\"content\": \"Article published to Note.com production!\\nCommit: ${{ github.sha }}\"}" \
+              "$DISCORD_WEBHOOK_URL"
+          fi
+
+      - name: Send Discord notification on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+            curl -H "Content-Type: application/json" \
+              -d "{\"content\": \"Failed to publish article to Note.com production!\\nCommit: ${{ github.sha }}\"}" \
+              "$DISCORD_WEBHOOK_URL"
+          fi
