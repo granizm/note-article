@@ -2,11 +2,10 @@
 set -euo pipefail
 
 # Note.com Publishing Script (Unofficial API)
-# Usage: ./publish.sh <mode> <markdown_file>
-#   mode: "draft" or "publish"
+# Usage: ./publish.sh <markdown_file>
+# Note: published status is read from frontmatter (published: true/false)
 
-MODE="${1:-}"
-MARKDOWN_FILE="${2:-}"
+MARKDOWN_FILE="${1:-}"
 API_BASE="https://note.com"
 IDS_FILE="note_article_ids.json"
 
@@ -29,13 +28,8 @@ log_error() {
 }
 
 # Validate inputs
-if [[ -z "$MODE" || -z "$MARKDOWN_FILE" ]]; then
-    log_error "Usage: $0 <draft|publish> <markdown_file>"
-    exit 1
-fi
-
-if [[ "$MODE" != "draft" && "$MODE" != "publish" ]]; then
-    log_error "Mode must be 'draft' or 'publish'"
+if [[ -z "$MARKDOWN_FILE" ]]; then
+    log_error "Usage: $0 <markdown_file>"
     exit 1
 fi
 
@@ -56,17 +50,34 @@ if [[ ! -f "$IDS_FILE" ]]; then
     echo '{}' > "$IDS_FILE"
 fi
 
-# Extract title from markdown (first H1)
-extract_title() {
+# Extract frontmatter value
+extract_frontmatter() {
     local file="$1"
-    grep -m 1 '^# ' "$file" | sed 's/^# //' || basename "$file" .md
+    local key="$2"
+    sed -n '/^---$/,/^---$/p' "$file" | grep "^${key}:" | sed "s/^${key}:[[:space:]]*//" | tr -d '"'
 }
 
-# Extract body from markdown (everything after first H1)
+# Extract title from frontmatter or first H1
+extract_title() {
+    local file="$1"
+    local title=$(extract_frontmatter "$file" "title")
+    if [[ -z "$title" ]]; then
+        title=$(grep -m 1 '^# ' "$file" | sed 's/^# //' || basename "$file" .md)
+    fi
+    echo "$title"
+}
+
+# Extract body from markdown (everything after frontmatter)
 extract_body() {
     local file="$1"
-    # Remove the first H1 line and return the rest
-    sed '0,/^# /d' "$file"
+    # Check if file has frontmatter
+    if head -1 "$file" | grep -q '^---$'; then
+        # Skip frontmatter
+        sed '1,/^---$/d' "$file" | sed '1,/^---$/d'
+    else
+        # No frontmatter, return entire file
+        cat "$file"
+    fi
 }
 
 # Get file key (used for tracking)
@@ -107,10 +118,8 @@ save_note_key() {
 
 # Get XSRF token from note.com
 get_xsrf_token() {
-    # First, make a request to note.com to get XSRF token from cookies
     local cookie_response=$(curl -s -c - -b "$NOTE_TOKEN" "${API_BASE}/" 2>/dev/null | grep XSRF-TOKEN | awk '{print $NF}')
     if [[ -n "$cookie_response" ]]; then
-        # URL decode the token
         echo "$cookie_response" | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))"
     else
         echo ""
@@ -128,11 +137,9 @@ create_or_update_draft() {
     log_info "Processing: $file_key"
     log_info "Title: $title"
 
-    # Get XSRF token
     local xsrf_token=$(get_xsrf_token)
     log_info "XSRF Token obtained: ${xsrf_token:0:10}..."
 
-    # Prepare request body - using note.com's GraphQL API format
     local request_body=$(jq -n \
         --arg title "$title" \
         --arg body "$body" \
@@ -149,7 +156,6 @@ create_or_update_draft() {
     local response
     local http_code
 
-    # Build headers array
     local -a headers=(
         -H "Content-Type: application/json"
         -H "Cookie: $NOTE_TOKEN"
@@ -157,14 +163,12 @@ create_or_update_draft() {
         -H "Referer: https://note.com/"
     )
 
-    # Add XSRF token if available
     if [[ -n "$xsrf_token" ]]; then
         headers+=(-H "X-XSRF-TOKEN: $xsrf_token")
     fi
 
     if [[ -n "$draft_id" ]]; then
         log_info "Updating existing draft: $draft_id"
-        # Update existing draft
         response=$(curl -s -w "\n%{http_code}" \
             -X PUT \
             "${headers[@]}" \
@@ -172,7 +176,6 @@ create_or_update_draft() {
             "${API_BASE}/api/v3/drafts/${draft_id}")
     else
         log_info "Creating new draft"
-        # Create new draft
         response=$(curl -s -w "\n%{http_code}" \
             -X POST \
             "${headers[@]}" \
@@ -184,7 +187,6 @@ create_or_update_draft() {
     response=$(echo "$response" | sed '$d')
 
     if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        # Extract and save draft ID from response
         local new_draft_id=$(echo "$response" | jq -r '.data.key // .data.id // empty')
         if [[ -n "$new_draft_id" ]]; then
             save_draft_id "$file_key" "$new_draft_id"
@@ -224,7 +226,6 @@ publish_draft() {
     response=$(echo "$response" | sed '$d')
 
     if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        # Extract and save note key from response
         local note_key=$(echo "$response" | jq -r '.data.key // empty')
         if [[ -n "$note_key" ]]; then
             save_note_key "$file_key" "$note_key"
@@ -239,17 +240,18 @@ publish_draft() {
     fi
 }
 
-# Main execution
-case "$MODE" in
-    draft)
-        create_or_update_draft "$MARKDOWN_FILE"
-        ;;
-    publish)
-        # First ensure draft is up to date
-        create_or_update_draft "$MARKDOWN_FILE"
-        # Then publish
-        publish_draft "$MARKDOWN_FILE"
-        ;;
-esac
+# Main execution - based on frontmatter published status
+PUBLISHED=$(extract_frontmatter "$MARKDOWN_FILE" "published")
+
+if [[ "$PUBLISHED" == "true" ]]; then
+    log_info "Mode: Publish (published: true)"
+    # First ensure draft is up to date
+    create_or_update_draft "$MARKDOWN_FILE"
+    # Then publish
+    publish_draft "$MARKDOWN_FILE"
+else
+    log_info "Mode: Draft (published: false or not specified)"
+    create_or_update_draft "$MARKDOWN_FILE"
+fi
 
 log_info "Done!"

@@ -1,0 +1,66 @@
+name: Publish to Note
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'posts/**'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.NOTE_TOKEN }}" ]; then
+            echo "Warning: NOTE_TOKEN secret is not set. Skipping Note publishing."
+            echo "Note: Note.com uses an unofficial API that may not work."
+            exit 0
+          fi
+
+      - name: Publish articles
+        if: ${{ secrets.NOTE_TOKEN != '' }}
+        env:
+          NOTE_TOKEN: ${{ secrets.NOTE_TOKEN }}
+        run: |
+          for file in posts/*.md; do
+            if [ -f "$file" ] && [ "$file" != "posts/.gitkeep" ]; then
+              echo "Processing: $file"
+              ./scripts/publish.sh "$file" || echo "Warning: Failed to publish $file (Note API may be unavailable)"
+            fi
+          done
+        continue-on-error: true
+
+      - name: Commit article IDs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add note_article_ids.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "chore: Update Note article IDs"
+          git push || true
+
+      - name: Notify Discord
+        if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            curl -X POST "$DISCORD_WEBHOOK" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\": \"✅ Noteに記事を同期しました\\nCommit: ${{ github.sha }}\\n\\n※ NoteはAPIが非公式のため、失敗する可能性があります\"}"
+          fi
+
+      - name: Notify Discord (Failed)
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            curl -X POST "$DISCORD_WEBHOOK" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\": \"⚠️ Note同期に失敗しました（APIが非公式のため正常動作しない可能性があります）\\nWorkflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+          fi
