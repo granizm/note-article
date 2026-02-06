@@ -105,6 +105,18 @@ save_note_key() {
     mv "$tmp_file" "$IDS_FILE"
 }
 
+# Get XSRF token from note.com
+get_xsrf_token() {
+    # First, make a request to note.com to get XSRF token from cookies
+    local cookie_response=$(curl -s -c - -b "$NOTE_TOKEN" "${API_BASE}/" 2>/dev/null | grep XSRF-TOKEN | awk '{print $NF}')
+    if [[ -n "$cookie_response" ]]; then
+        # URL decode the token
+        echo "$cookie_response" | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))"
+    else
+        echo ""
+    fi
+}
+
 # Create or update draft
 create_or_update_draft() {
     local markdown_file="$1"
@@ -116,7 +128,11 @@ create_or_update_draft() {
     log_info "Processing: $file_key"
     log_info "Title: $title"
 
-    # Prepare request body
+    # Get XSRF token
+    local xsrf_token=$(get_xsrf_token)
+    log_info "XSRF Token obtained: ${xsrf_token:0:10}..."
+
+    # Prepare request body - using note.com's GraphQL API format
     local request_body=$(jq -n \
         --arg title "$title" \
         --arg body "$body" \
@@ -133,13 +149,25 @@ create_or_update_draft() {
     local response
     local http_code
 
+    # Build headers array
+    local -a headers=(
+        -H "Content-Type: application/json"
+        -H "Cookie: $NOTE_TOKEN"
+        -H "Origin: https://note.com"
+        -H "Referer: https://note.com/"
+    )
+
+    # Add XSRF token if available
+    if [[ -n "$xsrf_token" ]]; then
+        headers+=(-H "X-XSRF-TOKEN: $xsrf_token")
+    fi
+
     if [[ -n "$draft_id" ]]; then
         log_info "Updating existing draft: $draft_id"
         # Update existing draft
         response=$(curl -s -w "\n%{http_code}" \
             -X PUT \
-            -H "Content-Type: application/json" \
-            -H "Cookie: $NOTE_TOKEN" \
+            "${headers[@]}" \
             -d "$request_body" \
             "${API_BASE}/api/v3/drafts/${draft_id}")
     else
@@ -147,8 +175,7 @@ create_or_update_draft() {
         # Create new draft
         response=$(curl -s -w "\n%{http_code}" \
             -X POST \
-            -H "Content-Type: application/json" \
-            -H "Cookie: $NOTE_TOKEN" \
+            "${headers[@]}" \
             -d "$request_body" \
             "${API_BASE}/api/v3/drafts")
     fi
